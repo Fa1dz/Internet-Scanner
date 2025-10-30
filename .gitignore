@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.venv/
+venv/
+.env
+env/
+
+# VS Code
+.vscode/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Distribution / build
+dist/
+build/
+*.egg-info/
+
+# Secrets (double-check you don't add credentials)
+secrets.*
