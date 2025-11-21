@@ -1,4 +1,4 @@
-# Local Network Scanner
+ki# Local Network Scanner
 
 A Tkinter GUI that scans a local IPv4 network (ARP + nmap probing), shows devices, lets you run full port scans, and export results.
 
@@ -35,7 +35,7 @@ Ensure nmap.exe is installed and available on PATH (run `nmap --version` to veri
 Recommended (Windows):
 - Right-click Visual Studio Code and choose "Run as administrator", open the project, press F5 to debug or Run.
 - Or open an Administrator PowerShell and run:
-  - python "c:\Users\...test.py"
+  - python "c:\Users\...Internet_Scanner.py"
 
 Notes:
 - The program will request elevation on start (ShellExecute). If you run from VS Code, start VS Code as admin to let the integrated debugger launch correctly with privileges.
@@ -94,4 +94,4 @@ Important: On Windows it is simpler to run VS Code itself as Administrator (righ
 Only scan networks and devices you own or have explicit permission to test. Unauthorized scanning can be illegal and disruptive.
 
 ## Contact / Feedback
-Open the script in VS Code and modify as needed. For feature requests or issues, add notes to the top of `test.py`.
+Open the script in VS Code and modify as needed. For feature requests or issues, add notes to the top of `Internet_Scanner.py`.
