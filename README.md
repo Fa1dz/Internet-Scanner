@@ -1,4 +1,4 @@
-ki# Local Network Scanner
+# Local Network Scanner
 
 A Tkinter GUI that scans a local IPv4 network (ARP + nmap probing), shows devices, lets you run full port scans, and export results.
 
