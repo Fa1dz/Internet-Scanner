@@ -35,7 +35,7 @@ Ensure nmap.exe is installed and available on PATH (run `nmap --version` to veri
 Recommended (Windows):
 - Right-click Visual Studio Code and choose "Run as administrator", open the project, press F5 to debug or Run.
 - Or open an Administrator PowerShell and run:
-  - python "c:\Users\liamh\OneDrive - Skagerak International School\Documents\Coding\test.py"
+  - python "c:\Users\...test.py"
 
 Notes:
 - The program will request elevation on start (ShellExecute). If you run from VS Code, start VS Code as admin to let the integrated debugger launch correctly with privileges.
