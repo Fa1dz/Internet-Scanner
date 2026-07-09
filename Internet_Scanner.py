@@ -5,6 +5,7 @@ from tqdm import tqdm
 from tkinter import ttk, messagebox, scrolledtext, filedialog
 import tkinter as tk
 import nmap
+import argparse
 import ctypes
 import sys
 import os
@@ -13,6 +14,9 @@ import json
 import csv
 import time
 import ipaddress
+import platform
+import re
+from collections import Counter
 from datetime import datetime
 import queue
 import threading
@@ -74,71 +78,133 @@ def get_device_info_nmap_gui(ip, put):
     except Exception as e:
         put(f"Error scanning {ip}: {e}\n")
 
+CRITICAL_PORTS = {21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 3389, 5900}
+
+
 def probe_latency(ip, timeout_ms=500):
     try:
         if sys.platform.startswith('win'):
-            proc = subprocess.run(['ping', '-n', '1', '-w', str(timeout_ms), ip],
-                                capture_output=True, text=True, timeout=timeout_ms/1000)
-            if proc.returncode == 0:
-                for line in proc.stdout.splitlines():
-                    if 'time=' in line:
-                        return line.split('time=')[1].split('ms')[0].strip()
+            cmd = ['ping', '-n', '1', '-w', str(timeout_ms), ip]
+        else:
+            timeout_s = max(1, int(timeout_ms / 1000))
+            cmd = ['ping', '-c', '1', '-W', str(timeout_s), ip]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(2, timeout_ms / 1000 + 1))
+        if proc.returncode == 0:
+            out = proc.stdout or ''
+            match = re.search(r'time[=<]\s*([0-9]+(?:\.[0-9]+)?)\s*ms', out, re.IGNORECASE)
+            if match:
+                val = match.group(1)
+                return str(int(float(val))) if float(val).is_integer() else val
     except Exception:
         pass
     return None
 
+
+def _assess_risk(ports):
+    if not ports:
+        return "Low"
+    open_ports = [p for p in ports if p.get('state') == 'open']
+    if not open_ports:
+        return "Low"
+    risky = [p for p in open_ports if int(p.get('port', 0)) in CRITICAL_PORTS]
+    if len(open_ports) >= 12 or len(risky) >= 6:
+        return "Critical"
+    if len(open_ports) >= 7 or len(risky) >= 4:
+        return "High"
+    if len(open_ports) >= 3 or len(risky) >= 2:
+        return "Medium"
+    return "Low"
+
+
+def _format_ports_summary(ports, limit=8):
+    open_ports = [p for p in ports if p.get('state') == 'open']
+    open_ports = sorted(open_ports, key=lambda x: int(x.get('port', 0)))
+    samples = [f"{p.get('port')}/{p.get('proto')}:{p.get('service') or 'unknown'}" for p in open_ports[:limit]]
+    more = "..." if len(open_ports) > limit else ""
+    return ", ".join(samples) + more
+
+
+def format_device_details(dev):
+    open_ports = [p for p in dev.get('ports', []) if p.get('state') == 'open']
+    service_counter = Counter((p.get('service') or 'unknown') for p in open_ports)
+    top_services = ", ".join(f"{name} ({count})" for name, count in service_counter.most_common(6)) or "None"
+    lines = [
+        f"IP Address: {dev.get('ip', '')}",
+        f"Hostname: {dev.get('hostname') or 'Unknown'}",
+        f"State: {dev.get('state') or 'Unknown'}",
+        f"MAC Address: {dev.get('mac') or 'Unknown'}",
+        f"Vendor: {dev.get('vendor') or 'Unknown'}",
+        f"Operating System: {dev.get('os') or 'Unknown'}",
+        f"Latency: {dev.get('latency_ms') or 'N/A'} ms",
+        f"Risk Level: {dev.get('risk') or 'Unknown'}",
+        f"Open Ports ({len(open_ports)}): {_format_ports_summary(dev.get('ports', [])) or 'None'}",
+        f"Top Services: {top_services}",
+        f"Last Scan: {dev.get('scan_time') or 'Unknown'}",
+    ]
+    return "\n".join(lines)
+
 def get_device_info_struct(ip):
     info = {'ip': ip, 'hostname': None, 'state': None, 'mac': None, 'vendor': None,
-            'os': None, 'latency_ms': None, 'ports': [], 'raw': None}
+            'os': None, 'latency_ms': None, 'ports': [], 'raw': None, 'risk': 'Unknown',
+            'open_port_count': 0, 'scan_time': datetime.now().isoformat(timespec='seconds')}
     try:
-        # Faster scan with fewer options
         nm = nmap.PortScanner()
-        nm.scan(ip, arguments='-sn -T4 --host-timeout 5s')  # Quick ping scan
-        
+        nm.scan(ip, arguments='-sn -PE -PS22,80,443 -PA3389 -T3 --host-timeout 8s')
+
         if ip in nm.all_hosts():
             host = nm[ip]
-            
-            # Basic info from initial scan
             info.update({
                 'hostname': host.get('hostnames', [{'name': None}])[0].get('name'),
                 'state': host.get('status', {}).get('state'),
                 'mac': host.get('addresses', {}).get('mac'),
                 'vendor': host.get('vendor', {}).get(host.get('addresses', {}).get('mac', ''), '')
             })
-            
-            # Quick port scan for most common ports
-            nm.scan(ip, arguments='-sS -T4 -F --version-light --host-timeout 10s')
-            if ip in nm.all_hosts():
-                host = nm[ip]
-                
-                # Handle OS detection (if available)
-                if 'osmatch' in host and host['osmatch']:
-                    info['os'] = host['osmatch'][0].get('name', '')
-                
-                # Handle ports (only most common)
-                for proto in host.all_protocols():
-                    ports = host[proto].keys()
-                    for p in ports:
-                        port_info = host[proto][p]
-                        info['ports'].append({
-                            'port': int(p),
-                            'proto': proto,
-                            'state': port_info.get('state', ''),
-                            'service': port_info.get('name', ''),
-                            'version': port_info.get('version', '')
-                        })
-        
-        # Quick latency check
+
+        nm.scan(ip, arguments='-sS -sV -O --osscan-limit --version-light --top-ports 200 --open --host-timeout 20s')
+        if ip in nm.all_hosts():
+            host = nm[ip]
+            if not info.get('hostname'):
+                info['hostname'] = host.get('hostnames', [{'name': None}])[0].get('name')
+            if not info.get('state'):
+                info['state'] = host.get('status', {}).get('state')
+            if not info.get('mac'):
+                info['mac'] = host.get('addresses', {}).get('mac')
+            if not info.get('vendor'):
+                info['vendor'] = host.get('vendor', {}).get(host.get('addresses', {}).get('mac', ''), '')
+
+            if 'osmatch' in host and host['osmatch']:
+                info['os'] = host['osmatch'][0].get('name', '')
+            elif host.get('fingerprint'):
+                info['os'] = host.get('fingerprint')
+
+            for proto in host.all_protocols():
+                ports = host[proto].keys()
+                for p in ports:
+                    port_info = host[proto][p]
+                    info['ports'].append({
+                        'port': int(p),
+                        'proto': proto,
+                        'state': port_info.get('state', ''),
+                        'service': port_info.get('name', ''),
+                        'version': port_info.get('version', ''),
+                        'product': port_info.get('product', '')
+                    })
+
         info['latency_ms'] = probe_latency(ip, timeout_ms=500)
-        
+        open_ports = [p for p in info['ports'] if p.get('state') == 'open']
+        info['open_port_count'] = len(open_ports)
+        info['risk'] = _assess_risk(info['ports'])
+        info['ports_summary'] = _format_ports_summary(info['ports'])
     except Exception as e:
         print(f"Error scanning {ip}: {e}")
-        
+
     return info
 
 def is_admin():
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
+        if sys.platform.startswith('win'):
+            return ctypes.windll.shell32.IsUserAnAdmin()
+        return os.geteuid() == 0
     except:
         return False
 
@@ -155,11 +221,31 @@ def restart_as_admin():
 class ScannerGUI:
     def __init__(self, root):
         self.root = root
-        root.title("Local Network Scanner")
-        root.geometry("1000x700")
+        root.title("Local Network Scanner Pro")
+        root.geometry("1200x760")
+        self.style = ttk.Style()
+        if "clam" in self.style.theme_names():
+            self.style.theme_use("clam")
+        self.style.configure("Header.TLabel", font=("Segoe UI", 16, "bold"))
+        self.style.configure("SubHeader.TLabel", font=("Segoe UI", 10))
+        self.style.configure("Stats.TLabel", font=("Segoe UI", 10, "bold"))
+
+        self.sort_state = {}
+        self.filter_var = tk.StringVar()
+        self.only_open_var = tk.BooleanVar(value=False)
+
+        # Header frame
+        header = ttk.Frame(root, padding=(10, 10, 10, 6))
+        header.pack(fill='x')
+        ttk.Label(header, text="Network Scanner Pro", style="Header.TLabel").pack(anchor='w')
+        ttk.Label(
+            header,
+            text="Real-time LAN discovery, richer host insights, smart risk scoring, and fast filtering.",
+            style="SubHeader.TLabel"
+        ).pack(anchor='w', pady=(2, 0))
 
         # Input frame
-        frm = ttk.Frame(root, padding=8)
+        frm = ttk.Frame(root, padding=(10, 2, 10, 8))
         frm.pack(fill='x')
 
         examples = (
@@ -174,40 +260,75 @@ class ScannerGUI:
         lbl_examples.pack(fill='x')
 
         entry_frame = ttk.Frame(frm)
-        entry_frame.pack(fill='x', pady=(6,0))
+        entry_frame.pack(fill='x', pady=(6, 0))
         ttk.Label(entry_frame, text="IP range:").pack(side='left')
         self.ip_var = tk.StringVar(value="192.168.1.0/24")
         self.entry = ttk.Entry(entry_frame, textvariable=self.ip_var, width=50)
-        self.entry.pack(side='left', padx=(6,6))
+        self.entry.pack(side='left', padx=(6, 6))
 
         self.start_btn = ttk.Button(entry_frame, text="Start Scan", command=self.start_scan)
         self.start_btn.pack(side='left')
         self.full_scan_btn = ttk.Button(entry_frame, text="Full Port Scan", command=self.full_port_scan)
-        self.full_scan_btn.pack(side='left', padx=(6,0))
+        self.full_scan_btn.pack(side='left', padx=(6, 0))
+        self.rescan_btn = ttk.Button(entry_frame, text="Rescan Selected", command=self.rescan_selected)
+        self.rescan_btn.pack(side='left', padx=(6, 0))
         self.stop_btn = ttk.Button(entry_frame, text="Stop", command=self.stop_scan, state='disabled')
-        self.stop_btn.pack(side='left', padx=(6,0))
+        self.stop_btn.pack(side='left', padx=(6, 0))
         self.export_btn = ttk.Button(entry_frame, text="Export CSV", command=self.export_csv)
-        self.export_btn.pack(side='left', padx=(6,0))
+        self.export_btn.pack(side='left', padx=(6, 0))
         self.save_btn = ttk.Button(entry_frame, text="Save JSON", command=self.save_json)
-        self.save_btn.pack(side='left', padx=(6,0))
+        self.save_btn.pack(side='left', padx=(6, 0))
+        self.copy_ip_btn = ttk.Button(entry_frame, text="Copy IP", command=self.copy_selected_ip)
+        self.copy_ip_btn.pack(side='left', padx=(6, 0))
+        self.insights_btn = ttk.Button(entry_frame, text="Network Insights", command=self.show_network_insights)
+        self.insights_btn.pack(side='left', padx=(6, 0))
         self.quit_btn = ttk.Button(entry_frame, text="Quit", command=root.quit)
-        self.quit_btn.pack(side='left', padx=(6,0))
+        self.quit_btn.pack(side='left', padx=(6, 0))
+
+        filter_frame = ttk.Frame(frm)
+        filter_frame.pack(fill='x', pady=(8, 2))
+        ttk.Label(filter_frame, text="Filter devices:").pack(side='left')
+        self.filter_entry = ttk.Entry(filter_frame, textvariable=self.filter_var, width=36)
+        self.filter_entry.pack(side='left', padx=(6, 8))
+        self.filter_entry.bind('<KeyRelease>', lambda _e: self.apply_filters())
+        ttk.Checkbutton(
+            filter_frame, text="Show only devices with open ports", variable=self.only_open_var,
+            command=self.apply_filters
+        ).pack(side='left')
+
+        stats = ttk.Frame(frm)
+        stats.pack(fill='x', pady=(4, 0))
+        self.total_lbl = ttk.Label(stats, text="Total: 0", style="Stats.TLabel")
+        self.total_lbl.pack(side='left', padx=(0, 12))
+        self.open_lbl = ttk.Label(stats, text="With Open Ports: 0", style="Stats.TLabel")
+        self.open_lbl.pack(side='left', padx=(0, 12))
+        self.risk_lbl = ttk.Label(stats, text="High/Critical Risk: 0", style="Stats.TLabel")
+        self.risk_lbl.pack(side='left', padx=(0, 12))
+        self.latency_lbl = ttk.Label(stats, text="Avg Latency: N/A", style="Stats.TLabel")
+        self.latency_lbl.pack(side='left')
 
         # Progress bar
         self.progress = ttk.Progressbar(frm, mode='determinate')
-        self.progress.pack(fill='x', pady=(8,0))
+        self.progress.pack(fill='x', pady=(8, 0))
 
         # Upper: device table; Lower: details text
         paned = ttk.PanedWindow(root, orient='vertical')
         paned.pack(fill='both', expand=True, padx=8, pady=8)
 
         # Treeview for devices
-        cols = ('ip','mac','hostname','vendor','latency_ms','open_ports','os')
+        cols = ('ip', 'hostname', 'vendor', 'latency_ms', 'open_port_count', 'risk', 'open_ports', 'os', 'mac')
         self.tree = ttk.Treeview(paned, columns=cols, show='headings', selectmode='browse')
         for c in cols:
-            self.tree.heading(c, text=c.upper())
+            self.tree.heading(c, text=c.upper(), command=lambda col=c: self.sort_tree(col))
             self.tree.column(c, anchor='w', width=120)
-        self.tree.column('open_ports', width=180)
+        self.tree.column('ip', width=140)
+        self.tree.column('hostname', width=170)
+        self.tree.column('vendor', width=170)
+        self.tree.column('open_ports', width=220)
+        self.tree.column('os', width=240)
+        self.tree.column('mac', width=130)
+        self.tree.column('open_port_count', width=115)
+        self.tree.column('risk', width=100)
         self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
         tree_frame = ttk.Frame(paned)
         self.tree.pack(fill='both', expand=True, in_=tree_frame)
@@ -223,6 +344,7 @@ class ScannerGUI:
         self.worker = None
         self.stop_event = threading.Event()
         self.devices_data = []  # list of structured device dicts
+        self.selected_ip = None
         self.root.after(200, self._poll_queue)
 
     def append_text(self, text):
@@ -246,28 +368,78 @@ class ScannerGUI:
         self.root.after(200, self._poll_queue)
 
     def _upsert_device_in_table(self, dev):
-        # find existing by IP
         ip = dev.get('ip')
-        for iid in self.tree.get_children():
-            if self.tree.set(iid, 'ip') == ip:
-                # update
-                self.tree.set(iid, 'mac', dev.get('mac') or '')
-                self.tree.set(iid, 'hostname', dev.get('hostname') or '')
-                self.tree.set(iid, 'vendor', dev.get('vendor') or '')
-                self.tree.set(iid, 'latency_ms', dev.get('latency_ms') or '')
-                # open_ports summary
-                ports = ','.join(str(p['port']) for p in dev.get('ports', [])[:6])
-                self.tree.set(iid, 'open_ports', ports)
-                self.tree.set(iid, 'os', dev.get('os') or '')
-                return
-        # insert new
-        ports = ','.join(str(p['port']) for p in dev.get('ports', [])[:6])
-        iid = self.tree.insert('', 'end', values=(
-            dev.get('ip'), dev.get('mac') or '', dev.get('hostname') or '',
-            dev.get('vendor') or '', dev.get('latency_ms') or '', ports, dev.get('os') or ''
-        ))
-        # save mapping index
-        self.devices_data.append(dev)
+        existing = next((d for d in self.devices_data if d.get('ip') == ip), None)
+        if existing:
+            existing.update(dev)
+        else:
+            self.devices_data.append(dev)
+        self.apply_filters()
+        self._update_stats()
+
+    def _to_float(self, value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _update_stats(self):
+        total = len(self.devices_data)
+        with_open = [d for d in self.devices_data if d.get('open_port_count', 0) > 0]
+        high_risk = [d for d in self.devices_data if d.get('risk') in ("High", "Critical")]
+        latency_values = [self._to_float(d.get('latency_ms')) for d in self.devices_data]
+        latency_values = [v for v in latency_values if v is not None]
+        avg_latency = f"{sum(latency_values)/len(latency_values):.1f} ms" if latency_values else "N/A"
+
+        self.total_lbl.configure(text=f"Total: {total}")
+        self.open_lbl.configure(text=f"With Open Ports: {len(with_open)}")
+        self.risk_lbl.configure(text=f"High/Critical Risk: {len(high_risk)}")
+        self.latency_lbl.configure(text=f"Avg Latency: {avg_latency}")
+
+    def apply_filters(self):
+        query = self.filter_var.get().strip().lower()
+        only_open = self.only_open_var.get()
+        selected = self.tree.selection()
+        selected_ip = self.tree.set(selected[0], 'ip') if selected else None
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for dev in self.devices_data:
+            if only_open and dev.get('open_port_count', 0) <= 0:
+                continue
+            searchable = " ".join([
+                str(dev.get('ip', '')), str(dev.get('hostname', '')), str(dev.get('vendor', '')),
+                str(dev.get('os', '')), str(dev.get('risk', ''))
+            ]).lower()
+            if query and query not in searchable:
+                continue
+            values = (
+                dev.get('ip'),
+                dev.get('hostname') or '',
+                dev.get('vendor') or '',
+                dev.get('latency_ms') or '',
+                dev.get('open_port_count') or 0,
+                dev.get('risk') or '',
+                dev.get('ports_summary') or '',
+                dev.get('os') or '',
+                dev.get('mac') or ''
+            )
+            iid = self.tree.insert('', 'end', values=values)
+            if selected_ip and dev.get('ip') == selected_ip:
+                self.tree.selection_set(iid)
+
+    def sort_tree(self, column):
+        reverse = self.sort_state.get(column, False)
+        self.sort_state[column] = not reverse
+        rows = [(self.tree.set(item, column), item) for item in self.tree.get_children('')]
+        numeric_cols = {'latency_ms', 'open_port_count'}
+        if column in numeric_cols:
+            rows.sort(key=lambda x: float(x[0]) if str(x[0]).replace('.', '', 1).isdigit() else float('inf'), reverse=reverse)
+        else:
+            rows.sort(key=lambda x: str(x[0]).lower(), reverse=reverse)
+        for idx, (_, item) in enumerate(rows):
+            self.tree.move(item, '', idx)
 
     def on_tree_select(self, event):
         sel = self.tree.selection()
@@ -275,17 +447,14 @@ class ScannerGUI:
             return
         iid = sel[0]
         ip = self.tree.set(iid, 'ip')
-        # find device struct
-        dev = None
-        for d in self.devices_data:
-            if d.get('ip') == ip:
-                dev = d; break
+        self.selected_ip = ip
+        dev = next((d for d in self.devices_data if d.get('ip') == ip), None)
         if not dev:
             return
-        # show detailed info
-        text = json.dumps(dev, indent=2, default=str)
         self.text.delete('1.0', 'end')
-        self.append_text(text + '\n')
+        self.append_text(format_device_details(dev) + '\n\n')
+        self.append_text("Raw Data:\n")
+        self.append_text(json.dumps(dev, indent=2, default=str) + '\n')
 
     def start_scan(self):
         val = self.ip_var.get().strip()
@@ -300,6 +469,8 @@ class ScannerGUI:
 
         # disable start, enable stop
         self.start_btn['state'] = 'disabled'
+        self.full_scan_btn['state'] = 'disabled'
+        self.rescan_btn['state'] = 'disabled'
         self.stop_btn['state'] = 'normal'
         self.text.delete('1.0', 'end')
         self.progress['value'] = 0
@@ -308,10 +479,72 @@ class ScannerGUI:
         for c in self.tree.get_children():
             self.tree.delete(c)
         self.devices_data = []
+        self._update_stats()
 
         # launch worker thread
         self.worker = threading.Thread(target=self._worker_thread, args=(parsed,), daemon=True)
         self.worker.start()
+
+    def copy_selected_ip(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select Device", "Select a device first.")
+            return
+        ip = self.tree.set(sel[0], 'ip')
+        if not ip:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(ip)
+        self.append_text(f"Copied IP to clipboard: {ip}\n")
+
+    def rescan_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select Device", "Select a device from the table first.")
+            return
+        ip = self.tree.set(sel[0], 'ip')
+        if not ip:
+            return
+
+        self.start_btn['state'] = 'disabled'
+        self.full_scan_btn['state'] = 'disabled'
+        self.rescan_btn['state'] = 'disabled'
+        self.stop_btn['state'] = 'normal'
+        self.progress['value'] = 0
+        self.stop_event.clear()
+
+        def scan_selected():
+            try:
+                self.q.put(f"Rescanning {ip}...\n")
+                devinfo = get_device_info_struct(ip)
+                self.q.put({'type': 'device_update', 'device': devinfo})
+                self.q.put(format_device_details(devinfo) + '\n')
+                self.q.put({'type': 'progress', 'total': 1, 'value': 1})
+            except Exception as e:
+                self.q.put(f"Rescan error: {e}\n")
+            finally:
+                self._finish_worker()
+
+        threading.Thread(target=scan_selected, daemon=True).start()
+
+    def show_network_insights(self):
+        self.append_text("\nNetwork Insights:\n")
+        try:
+            host_name = socket.gethostname()
+            local_ip = socket.gethostbyname(host_name)
+            self.append_text(f"  Hostname: {host_name}\n")
+            self.append_text(f"  Local IP: {local_ip}\n")
+            self.append_text(f"  Platform: {platform.system()} {platform.release()}\n")
+        except Exception as e:
+            self.append_text(f"  Local network info unavailable: {e}\n")
+
+        try:
+            response = requests.get("https://api.ipify.org?format=json", timeout=2)
+            if response.ok:
+                public_ip = response.json().get('ip')
+                self.append_text(f"  Public IP: {public_ip}\n")
+        except Exception:
+            self.append_text("  Public IP lookup unavailable.\n")
 
     def stop_scan(self):
         self.stop_event.set()
@@ -364,8 +597,7 @@ class ScannerGUI:
                     devinfo['mac'] = mac
                 # queue device update for UI table
                 self.q.put({'type':'device_update', 'device': devinfo})
-                # append full detail to text window as well
-                self.q.put(json.dumps(devinfo, indent=2, default=str) + '\n')
+                self.q.put(format_device_details(devinfo) + '\n')
                 idx += 1
                 self.q.put({'type':'progress', 'total': len(devices), 'value': idx})
                 # small delay to avoid overwhelming local network/nmap
@@ -380,6 +612,8 @@ class ScannerGUI:
     def _finish_worker(self):
         self.q.put("\nReady for next scan.\n")
         self.start_btn['state'] = 'normal'
+        self.full_scan_btn['state'] = 'normal'
+        self.rescan_btn['state'] = 'normal'
         self.stop_btn['state'] = 'disabled'
         self.stop_event.clear()
 
@@ -393,10 +627,14 @@ class ScannerGUI:
                 return
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(['ip','mac','hostname','vendor','latency_ms','os','open_ports'])
+                writer.writerow(['ip','hostname','vendor','mac','latency_ms','risk','open_port_count','os','open_ports'])
                 for d in self.devices_data:
                     ports = ';'.join(f"{p['port']}/{p['proto']}({p['state']})" for p in d.get('ports',[]))
-                    writer.writerow([d.get('ip'), d.get('mac'), d.get('hostname'), d.get('vendor'), d.get('latency_ms'), d.get('os'), ports])
+                    writer.writerow([
+                        d.get('ip'), d.get('hostname'), d.get('vendor'), d.get('mac'),
+                        d.get('latency_ms'), d.get('risk'), d.get('open_port_count'),
+                        d.get('os'), ports
+                    ])
             messagebox.showinfo("Exported", f"Saved CSV to {path}")
         except Exception as e:
             messagebox.showerror("Export failed", str(e))
@@ -433,6 +671,7 @@ class ScannerGUI:
                               f"Run full port scan on {ip}?\nThis may take several minutes."):
             self.start_btn['state'] = 'disabled'
             self.full_scan_btn['state'] = 'disabled'
+            self.rescan_btn['state'] = 'disabled'
             self.stop_btn['state'] = 'normal'
             self.text.delete('1.0', 'end')
             self.progress['value'] = 0
@@ -482,7 +721,13 @@ class ScannerGUI:
                             for proto in host.all_protocols()
                             for port in host[proto].keys()
                             ]
+                            device['open_port_count'] = len([p for p in device['ports'] if p.get('state') == 'open'])
+                            device['risk'] = _assess_risk(device['ports'])
+                            device['ports_summary'] = _format_ports_summary(device['ports'])
+                            device['scan_time'] = datetime.now().isoformat(timespec='seconds')
                             self.q.put({'type': 'device_update', 'device': device})
+                            self.q.put("\nUpdated Device Summary:\n")
+                            self.q.put(format_device_details(device) + "\n")
                     else:
                         self.q.put(f"No results found for {ip}\n")
                         
@@ -501,7 +746,6 @@ class ScannerGUI:
             line = self.text.get(f"{index} linestart", f"{index} lineend")
             
             # Look for IP address in the line
-            import re
             ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', line)
             if ip_match:
                 ip = ip_match.group(0)
@@ -530,6 +774,7 @@ def parse_ip_range(value):
     Returns either a canonical CIDR string (for networks) or a list of IP strings.
     """
     value = value.strip()
+    max_expand = 65536
     # Comma separated -> expand each and flatten
     if ',' in value:
         parts = [p.strip() for p in value.split(',') if p.strip()]
@@ -542,15 +787,25 @@ def parse_ip_range(value):
                 # network string -> expand to addresses (beware large networks)
                 net = ipaddress.ip_network(expanded, strict=False)
                 ips.extend([str(ip) for ip in net.hosts()] or [str(ip) for ip in net])
-        return ips
+            if len(ips) > max_expand:
+                raise argparse.ArgumentTypeError(f"Range too large ({len(ips)} addresses). Limit is {max_expand}.")
+        # preserve order while removing duplicates
+        seen = set()
+        deduped = []
+        for ip in ips:
+            if ip not in seen:
+                deduped.append(ip)
+                seen.add(ip)
+        return deduped
 
     # CIDR?
-    try:
-        net = ipaddress.ip_network(value, strict=False)
-        # return canonical network string (let scapy accept CIDR directly)
-        return str(net)
-    except ValueError:
-        pass
+    if '/' in value:
+        try:
+            net = ipaddress.ip_network(value, strict=False)
+            # return canonical network string (let scapy accept CIDR directly)
+            return str(net)
+        except ValueError:
+            pass
 
     # Wildcard (e.g. 192.168.1.*)
     if '*' in value:
@@ -604,9 +859,9 @@ def parse_ip_range(value):
 
         # build list (beware very large ranges)
         count = int(end_ip) - int(start_ip) + 1
-        if count > 65536:
+        if count > max_expand:
             # defensive limit to avoid accidental huge expansions; remove or increase if you need
-            raise argparse.ArgumentTypeError(f"Range too large ({count} addresses). Limit is 65536.")
+            raise argparse.ArgumentTypeError(f"Range too large ({count} addresses). Limit is {max_expand}.")
         return [str(ipaddress.ip_address(int(start_ip) + i)) for i in range(count)]
 
     # Single IP?
@@ -651,7 +906,7 @@ def prompt_for_ip_range(default="192.168.1.0/24"):
 # Replace existing __main__ behavior with GUI
 if __name__ == '__main__':
     print("Starting Network Scanner...")
-    if not is_admin():
+    if sys.platform.startswith('win') and not is_admin():
         print("Requesting admin privileges...")
         try:
             script = sys.executable

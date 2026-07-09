@@ -4,8 +4,12 @@ A Tkinter GUI that scans a local IPv4 network (ARP + nmap probing), shows device
 
 ## Quick overview
 - ARP scan to discover devices on the LAN.
-- Light nmap probes for hostname, vendor, open ports, OS guess, latency.
+- Improved nmap probes for hostname, vendor, open ports, OS guess, and latency.
 - Full-port button runs an intensive nmap scan for a selected device.
+- Smart risk scoring (Low/Medium/High/Critical) based on detected open ports.
+- Real-time dashboard stats (total devices, open-port hosts, high-risk hosts, average latency).
+- Live filtering/search and sortable table columns for faster triage.
+- Rescan-selected, copy-IP, and network insights (local/public IP + platform details).
 - Export results to CSV or JSON.
 
 ## Requirements
@@ -72,10 +76,15 @@ Important: On Windows it is simpler to run VS Code itself as Administrator (righ
 - Buttons:
   - Start Scan — ARP discover + light probes
   - Full Port Scan — select a row, click to run an intensive nmap scan on that IP
+  - Rescan Selected — refreshes details for only the currently selected host
+  - Copy IP — copies selected host IP to clipboard
+  - Network Insights — prints local/public network metadata in the log panel
   - Stop — request scan stop
   - Export CSV / Save JSON — save collected device info
   - Quit — close app
-- Click a device row to show structured details in the lower panel. You can click lines in the log to auto-select devices if an IP is present.
+- Filter devices in real-time (search by IP, hostname, vendor, OS, or risk) and optionally show only hosts with open ports.
+- Click column headers to sort rows.
+- Click a device row to show a user-friendly summary plus raw structured data in the lower panel. You can click lines in the log to auto-select devices if an IP is present.
 
 ## Behavior & limits
 - ARP scanning works only on the local Ethernet/LAN segment.
