@@ -102,5 +102,23 @@ Important: On Windows it is simpler to run VS Code itself as Administrator (righ
 ## Security and legal
 Only scan networks and devices you own or have explicit permission to test. Unauthorized scanning can be illegal and disruptive.
 
-## Contact / Feedback
-Open the script in VS Code and modify as needed. For feature requests or issues, add notes to the top of `Internet_Scanner.py`.
+## Roadmap
+
+### Scanner Improvements
+- [ ] Faster asynchronous scanning
+- [ ] Better OS detection
+- [ ] More device fingerprinting
+
+### Interface
+- [ ] Dark mode
+- [ ] Better dashboard charts
+- [ ] Network topology map
+
+### Security Features
+- [ ] Vulnerability checks
+- [ ] Service detection improvements
+- [ ] Security report generation
+
+### Platform Support
+- [ ] Linux support
+- [ ] macOS support
