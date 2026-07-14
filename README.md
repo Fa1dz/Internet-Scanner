@@ -39,7 +39,7 @@ Ensure nmap.exe is installed and available on PATH (run `nmap --version` to veri
 Recommended (Windows):
 - Right-click Visual Studio Code and choose "Run as administrator", open the project, press F5 to debug or Run.
 - Or open an Administrator PowerShell and run:
-  - python "c:\Users\...Internet_Scanner.py"
+  - python app.py
 
 Notes:
 - The program will request elevation on start (ShellExecute). If you run from VS Code, start VS Code as admin to let the integrated debugger launch correctly with privileges.
@@ -56,9 +56,9 @@ If you want a debug configuration, add `.vscode/launch.json` (example):
       "name": "Network Scanner (Admin)",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/test.py",
+      "program": "${workspaceFolder}/app.py",
       "console": "integratedTerminal",
-      "args": ["--run-as-admin"]
+      "args": []
     }
   ]
 }
